@@ -1,0 +1,78 @@
+name: Build Desktop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }} package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --no-bundle
+            artifact: windows-x64
+            output: codex-session-manager.exe
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            args: --bundles dmg
+            artifact: macos-arm64
+            output: bundle/dmg/*.dmg
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            args: --bundles dmg
+            artifact: macos-x64
+            output: bundle/dmg/*.dmg
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Test Rust
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Configure macOS ad-hoc signing
+        if: runner.os == 'macOS'
+        shell: bash
+        run: echo 'APPLE_SIGNING_IDENTITY=-' >> "$GITHUB_ENV"
+
+      - name: Build application package
+        run: npm run tauri build -- --target ${{ matrix.target }} ${{ matrix.args }}
+
+      - name: Upload application package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-session-manager-${{ matrix.artifact }}
+          path: src-tauri/target/${{ matrix.target }}/release/${{ matrix.output }}
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'Successful Build Desktop run ID (the number after /actions/runs/ in its URL)'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish existing packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+    steps:
+      - name: Verify build and read its version
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::Build run ID must contain only digits."
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN_ID" > run.json
+          jq -e '.status == "completed" and .conclusion == "success" and .path == ".github/workflows/build-desktop.yml"' run.json > /dev/null
+          sha=$(jq -r '.head_sha' run.json)
+          gh api "repos/$GH_REPO/contents/src-tauri/tauri.conf.json?ref=$sha" \
+            --jq '.content' | base64 --decode > tauri.conf.json
+          version=$(jq -r '.version' tauri.conf.json)
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable application version such as 1.0.1."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download the three build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for platform in windows-x64 macos-arm64 macos-x64; do
+            gh run download "$BUILD_RUN_ID" \
+              --name "codex-session-manager-$platform" \
+              --dir "installers/$platform"
+          done
+
+      - name: Create and publish release
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.build.outputs.tag }}
+          BUILD_SHA: ${{ steps.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          windows=(installers/windows-x64/codex-session-manager.exe)
+          arm=(installers/macos-arm64/*.dmg)
+          intel=(installers/macos-x64/*.dmg)
+          if [[ ! -f "${windows[0]}" ]] || (( ${#arm[@]} != 1 || ${#intel[@]} != 1 )); then
+            echo "::error::Expected a Windows standalone executable and two macOS installers. Select a build made with the portable Windows workflow."
+            exit 1
+          fi
+          # Fetch the lists successfully before checking for an existing version.
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > release-tags.txt
+          gh api --paginate "repos/$GH_REPO/git/matching-refs/tags/$RELEASE_TAG" --jq '.[].ref' > git-tags.txt
+          if grep -Fxq "$RELEASE_TAG" release-tags.txt || grep -Fxq "refs/tags/$RELEASE_TAG" git-tags.txt; then
+            echo "::error::This release or tag already exists. Use a new application version; existing releases are not overwritten."
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          mkdir -p release-assets
+          prefix="release-assets/codex-session-manager-$version"
+          cp "${windows[0]}" "$prefix-Windows-x64-portable.exe"
+          cp "${arm[0]}" "$prefix-macOS-AppleSilicon.dmg"
+          cp "${intel[0]}" "$prefix-macOS-Intel.dmg"
+          # Upload all assets to a draft before making the release public.
+          gh release create "$RELEASE_TAG" "$prefix-Windows-x64-portable.exe" \
+            "$prefix-macOS-AppleSilicon.dmg" "$prefix-macOS-Intel.dmg" \
+            --target "$BUILD_SHA" --title "Codex 会话管理 $RELEASE_TAG" \
+            --generate-notes --draft
+          gh release edit "$RELEASE_TAG" --draft=false
+          gh release view "$RELEASE_TAG" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"
