@@ -1996,7 +1996,7 @@ fn application_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
         // product identity explicitly, including a Dock-sized icon and credits.
         application_submenu.remove_at(0)?;
         let metadata = AboutMetadata {
-            name: Some("Codex 会话管理".into()),
+            name: Some("Codex Session Manager".into()),
             version: Some(env!("CARGO_PKG_VERSION").into()),
             copyright: Some("Copyright © 2026 H-Knight".into()),
             credits: Some("作者：H-Knight".into()),
@@ -2007,14 +2007,14 @@ fn application_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
         };
         let about = PredefinedMenuItem::about(
             app,
-            Some("关于 Codex 会话管理"),
+            Some("关于 Codex Session Manager"),
             Some(metadata),
         )?;
         application_submenu.prepend(&about)?;
         set_predefined_menu_text(&application_submenu, 2, "服务")?;
-        set_predefined_menu_text(&application_submenu, 4, "隐藏 Codex 会话管理")?;
+        set_predefined_menu_text(&application_submenu, 4, "隐藏 Codex Session Manager")?;
         set_predefined_menu_text(&application_submenu, 5, "隐藏其他应用")?;
-        set_predefined_menu_text(&application_submenu, 7, "退出 Codex 会话管理")?;
+        set_predefined_menu_text(&application_submenu, 7, "退出 Codex Session Manager")?;
     }
 
     let zoom_in = MenuItemBuilder::with_id("view.zoom-in", "放大")
@@ -2035,7 +2035,7 @@ fn application_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
                 submenu.set_text("文件")?;
                 set_predefined_menu_text(&submenu, 0, "关闭窗口")?;
                 #[cfg(not(target_os = "macos"))]
-                set_predefined_menu_text(&submenu, 1, "退出 Codex 会话管理")?;
+                set_predefined_menu_text(&submenu, 1, "退出 Codex Session Manager")?;
             }
             "Edit" => {
                 submenu.set_text("编辑")?;
@@ -2061,7 +2061,7 @@ fn application_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> tauri::Resu
             "Help" => {
                 submenu.set_text("帮助")?;
                 #[cfg(not(target_os = "macos"))]
-                set_predefined_menu_text(&submenu, 0, "关于 Codex 会话管理")?;
+                set_predefined_menu_text(&submenu, 0, "关于 Codex Session Manager")?;
             }
             _ => {}
         }

@@ -203,7 +203,7 @@ function render(): void {
     .filter((session) => selectedProject === "all" || session.projectId === selectedProject);
   app.innerHTML = `
     <header class="topbar">
-      <div><p class="eyebrow">LOCAL CODEX AUDIT</p><h1>Codex 会话管理</h1></div>
+      <div><p class="eyebrow">LOCAL CODEX AUDIT</p><h1>Codex Session Manager</h1></div>
       <div class="topbar-actions"><button id="export-sessions" class="button secondary">导出会话</button><button id="import-sessions" class="button secondary">导入会话</button><button id="backup-settings" class="button secondary">备份目录</button><button id="theme-toggle" class="button secondary" aria-label="切换主题">${theme === "dark" ? "☀ 浅色主题" : "◐ 深色主题"}</button><button id="rescan" class="button secondary">重新扫描</button></div>
     </header>
     <section class="summary-grid">

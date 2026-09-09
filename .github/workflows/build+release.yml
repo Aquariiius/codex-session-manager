@@ -18,9 +18,9 @@ jobs:
           - name: Windows x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            args: --no-bundle
+            args: --bundles nsis
             artifact: windows-x64
-            output: codex-session-manager.exe
+            output: bundle/nsis/*-setup.exe
           - name: macOS Apple Silicon
             runner: macos-15
             target: aarch64-apple-darwin
@@ -129,11 +129,11 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          windows=(installers/windows-x64/codex-session-manager.exe)
+          windows=(installers/windows-x64/*-setup.exe)
           arm=(installers/macos-arm64/*.dmg)
           intel=(installers/macos-x64/*.dmg)
-          if [[ ! -f "${windows[0]}" ]] || (( ${#arm[@]} != 1 || ${#intel[@]} != 1 )); then
-            echo "::error::Expected a Windows standalone executable and two macOS installers. Select a build made with the portable Windows workflow."
+          if (( ${#windows[@]} != 1 || ${#arm[@]} != 1 || ${#intel[@]} != 1 )); then
+            echo "::error::Expected one Windows NSIS installer and two macOS installers. Select a build made with the installer workflow."
             exit 1
           fi
           # Fetch the lists successfully before checking for an existing version.
@@ -145,14 +145,14 @@ jobs:
           fi
           version="${RELEASE_TAG#v}"
           mkdir -p release-assets
-          prefix="release-assets/codex-session-manager-$version"
-          cp "${windows[0]}" "$prefix-Windows-x64-portable.exe"
-          cp "${arm[0]}" "$prefix-macOS-AppleSilicon.dmg"
-          cp "${intel[0]}" "$prefix-macOS-Intel.dmg"
+          prefix="release-assets/Codex Session Manager_${version}"
+          cp "${windows[0]}" "${prefix}_x64-setup.exe"
+          cp "${arm[0]}" "${prefix}_aarch64.dmg"
+          cp "${intel[0]}" "${prefix}_x64.dmg"
           # Upload all assets to a draft before making the release public.
-          gh release create "$RELEASE_TAG" "$prefix-Windows-x64-portable.exe" \
-            "$prefix-macOS-AppleSilicon.dmg" "$prefix-macOS-Intel.dmg" \
-            --target "$BUILD_SHA" --title "Codex 会话管理 $RELEASE_TAG" \
+          gh release create "$RELEASE_TAG" "${prefix}_x64-setup.exe" \
+            "${prefix}_aarch64.dmg" "${prefix}_x64.dmg" \
+            --target "$BUILD_SHA" --title "Codex Session Manager $RELEASE_TAG" \
             --generate-notes --draft
           gh release edit "$RELEASE_TAG" --draft=false
           gh release view "$RELEASE_TAG" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"

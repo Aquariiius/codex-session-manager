@@ -18,9 +18,9 @@ jobs:
           - name: Windows x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            args: --no-bundle
+            args: --bundles nsis
             artifact: windows-x64
-            output: codex-session-manager.exe
+            output: bundle/nsis/*-setup.exe
           - name: macOS Apple Silicon
             runner: macos-15
             target: aarch64-apple-darwin

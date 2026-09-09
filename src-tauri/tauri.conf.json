@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex 会话管理",
+  "productName": "Codex Session Manager",
   "version": "1.0.0",
   "identifier": "com.knight.codex-session-manager",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Codex 会话管理",
+        "title": "Codex Session Manager",
         "width": 1320,
         "height": 850,
         "minWidth": 980,
