@@ -60,6 +60,7 @@ interface ActionResult {
 interface ProcessCloseResult {
   message: string;
   requested: number;
+  remaining: number;
 }
 
 interface Notice {
@@ -71,6 +72,7 @@ interface Notice {
 
 type PendingDeletion =
   | { kind: "session"; session: Session }
+  | { kind: "project"; project: Project }
   | { kind: "orphan"; logPath: string };
 
 interface RepairHistoryItem {
@@ -128,6 +130,10 @@ let backupHistory: BackupHistoryItem[] = [];
 let activeTab: "sessions" | "orphans" | "history" | "delete-history" | "backup-history" = "sessions";
 let selectedProject = "all";
 let selectedSession: Session | null = null;
+let selectedProjectForRepair: Project | null = null;
+let sessionRepairDraft: { sessionId: string; target: string; includeChildAgents: boolean } | null = null;
+let projectRepairDraft: { projectId: string; target: string } | null = null;
+let projectContextMenu: { projectId: string; x: number; y: number } | null = null;
 let healthFilter: "all" | "mismatch" | "unlinked" | "missing_log" | "healthy" = "all";
 let theme: "light" | "dark" = localStorage.getItem("theme") === "light" ? "light" : "dark";
 let backupBase = localStorage.getItem("backup-base");
@@ -140,8 +146,19 @@ let exportDirectory = "";
 let exportProject = "all";
 let collapsedExportProjects = new Set<string>();
 let importPackage: ImportPackageInfo | null = null;
+let importProjectPaths = new Map<string, string>();
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.isComposing || event.repeat) return;
+  const dialogs = document.querySelectorAll<HTMLElement>(".modal-backdrop");
+  const activeDialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
+  const defaultAction = activeDialog?.querySelector<HTMLButtonElement>("[data-default-action]") ?? null;
+  if (!defaultAction || defaultAction.disabled) return;
+  event.preventDefault();
+  defaultAction.click();
+});
 
 function escapeHtml(value: string | null | undefined): string {
   return (value ?? "—")
@@ -155,6 +172,21 @@ function escapeHtml(value: string | null | undefined): string {
 function displayTitle(value: string): string {
   const normalized = value.replaceAll(/\s+/g, " ").trim();
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized || "未命名会话";
+}
+
+function displayPathText(value: string): string {
+  return value.split("\n").map((path) => {
+    if (path.startsWith("\\\\?\\UNC\\")) return `\\\\${path.slice(8)}`;
+    if (path.startsWith("\\\\?\\")) return path.slice(4);
+    if (path.startsWith("//?/UNC/")) return `//${path.slice(8)}`;
+    if (path.startsWith("//?/")) return path.slice(4);
+    return path;
+  }).join("\n");
+}
+
+function joinDisplayPath(base: string, child: string): string {
+  const separator = base.includes("\\") ? "\\" : "/";
+  return `${base.replace(/[\\/]+$/, "")}${separator}${child.replace(/^[\\/]+/, "")}`;
 }
 
 function statusLabel(status: Status): string {
@@ -214,8 +246,8 @@ function render(): void {
       ${metric("遗留记录", report.summary.orphanRecords, "warn")}
     </section>
     <section class="source-note">
-      <span>当前数据源</span><code>${escapeHtml(report.stateDatabase)}</code>
-      <span>会话日志</span><code>${escapeHtml(report.codexHome)}/sessions · archived_sessions</code>
+      <span>当前数据源</span><code>${escapeHtml(displayPathText(report.stateDatabase))}</code>
+      <span>会话日志</span><code>${escapeHtml(displayPathText(joinDisplayPath(report.codexHome, "sessions")))} · archived_sessions</code>
     </section>
     <nav class="tabs" aria-label="页面">
       <button class="tab ${activeTab === "sessions" ? "active" : ""}" data-tab="sessions">项目与会话 <b>${report.summary.sessions}</b></button>
@@ -225,12 +257,14 @@ function render(): void {
       <button class="tab ${activeTab === "backup-history" ? "active" : ""}" data-tab="backup-history">备份历史 <b>${backupHistory.length}</b></button>
     </nav>
     ${activeTab === "sessions" ? sessionsView(filtered) : activeTab === "orphans" ? orphanView() : activeTab === "history" ? historyView() : activeTab === "delete-history" ? deleteHistoryView() : backupHistoryView()}
-    ${selectedSession ? repairDialog(selectedSession) : ""}
+    ${!notice && selectedSession ? repairDialog(selectedSession) : ""}
+    ${!notice && selectedProjectForRepair ? projectRepairDialog(selectedProjectForRepair) : ""}
     ${showBackupSettings ? backupSettingsDialog() : ""}
     ${showExportDialog ? exportDialog() : ""}
     ${importPackage ? importDialog(importPackage) : ""}
     ${notice ? noticeDialog(notice) : ""}
-    ${pendingDeletion ? deleteConfirmationDialog(pendingDeletion) : ""}
+    ${!notice && pendingDeletion ? deleteConfirmationDialog(pendingDeletion) : ""}
+    ${projectContextMenu ? projectMenu(projectContextMenu) : ""}
     <div id="toast" class="toast" role="status"></div>
   `;
   bindEvents();
@@ -246,12 +280,12 @@ function sessionsView(sessions: Session[]): string {
   const visibleProjects = report!.projects.filter((project) => healthFilter === "all" || projectSessionCount(project.id) > 0);
   const projectButtons = [
     `<button class="filter ${selectedProject === "all" ? "selected" : ""}" data-project="all">全部 <span>${healthSessions.length}</span></button>`,
-    ...visibleProjects.map((project) => `<button class="filter ${selectedProject === project.id ? "selected" : ""}" data-project="${escapeHtml(project.id)}">${escapeHtml(project.name)} <span>${projectSessionCount(project.id)}</span>${healthFilter === "all" && project.issueCount ? `<i>${project.issueCount}</i>` : ""}</button>`),
+    ...visibleProjects.map((project) => `<button class="filter ${selectedProject === project.id ? "selected" : ""}" data-project="${escapeHtml(project.id)}" title="左键筛选，右键管理项目">${escapeHtml(project.name)} <span>${projectSessionCount(project.id)}</span>${healthFilter === "all" && project.issueCount ? `<i>${project.issueCount}</i>` : ""}</button>`),
   ].join("");
   const rows = sessions.map((session) => `
     <tr>
       <td class="session-cell"><strong title="${escapeHtml(session.title)}">${escapeHtml(displayTitle(session.title))}</strong><small>${escapeHtml(session.id)}</small></td>
-      <td>${session.projectName ? escapeHtml(session.projectName) : '<span class="muted">未归属</span>'}</td>
+      <td class="project-cell" title="${escapeHtml(session.projectName ?? "未归属")}">${session.projectName ? escapeHtml(session.projectName) : '<span class="muted">未归属</span>'}</td>
       <td>${pathCell(session.projectRoots.join("\n") || null)}</td>
       <td>${pathCell(session.databaseCwd)}</td>
       <td>${pathCell(session.conversationCwd)}</td>
@@ -282,7 +316,9 @@ function sessionsView(sessions: Session[]): string {
 }
 
 function pathCell(path: string | null): string {
-  return path ? `<code class="path" title="${escapeHtml(path)}">${escapeHtml(path)}</code>` : '<span class="muted">未找到</span>';
+  if (!path) return '<span class="muted">未找到</span>';
+  const displayed = displayPathText(path);
+  return `<code class="path" title="${escapeHtml(displayed)}">${escapeHtml(displayed)}</code>`;
 }
 
 function orphanView(): string {
@@ -306,7 +342,7 @@ function historyView(): string {
       <td>${escapeHtml(new Date(item.createdAt).toLocaleString("zh-CN"))}${item.rolledBackAt ? `<span class="rollback-mark">已回退</span><small>${escapeHtml(new Date(item.rolledBackAt).toLocaleString("zh-CN"))}</small>` : ""}</td>
       <td>${pathCell(item.sourceCwd)}</td>
       <td>${pathCell(item.targetCwd)}</td>
-      <td>${item.fileCount} 个文件<small>${escapeHtml(item.backupFolder)}</small></td>
+      <td>${item.fileCount} 个文件<small>${escapeHtml(displayPathText(item.backupFolder))}</small></td>
       <td><div class="history-actions"><button class="button repair" data-rollback="${escapeHtml(item.manifestPath)}" title="回退此次修复">回退</button><button class="button danger" data-delete-backup="${escapeHtml(item.backupFolder)}" title="清除本历史及其备份">清除</button></div></td>
     </tr>`).join("");
   return `<section class="orphan-panel history-panel"><div class="table-title"><div><h2>会话修复历史</h2><p>记录每次修复前保存的数据库和对话日志。回退前必须关闭 Codex，管理器还会额外备份当前状态。</p></div><div class="table-title-actions"><span>${repairHistory.length} 条记录</span><button class="button danger compact" data-clear-history="repair" ${repairHistory.length ? "" : "disabled"}>一键清除</button></div></div>
@@ -325,8 +361,8 @@ function deleteHistoryView(): string {
       <td><strong>${escapeHtml(displayTitle(item.sessionTitle))}</strong><small>${escapeHtml(detail)}</small></td>
       <td>${escapeHtml(new Date(item.createdAt).toLocaleString("zh-CN"))}${item.rolledBackAt ? `<span class="rollback-mark">已回退</span><small>${escapeHtml(new Date(item.rolledBackAt).toLocaleString("zh-CN"))}</small>` : ""}</td>
       <td>${item.deletionKind === "session" ? children : "单个日志文件"}</td>
-      <td>${item.fileCount} 个文件<small>${escapeHtml(item.backupFolder)}</small></td>
-      <td><div class="history-actions"><button class="button repair" data-delete-rollback="${escapeHtml(`${item.backupFolder}/delete-history.json`)}" title="回退此次删除">回退</button><button class="button danger" data-delete-backup="${escapeHtml(item.backupFolder)}" title="清除本历史及其备份">清除</button></div></td>
+      <td>${item.fileCount} 个文件<small>${escapeHtml(displayPathText(item.backupFolder))}</small></td>
+      <td><div class="history-actions"><button class="button repair" data-delete-rollback="${escapeHtml(joinDisplayPath(item.backupFolder, "delete-history.json"))}" title="回退此次删除">回退</button><button class="button danger" data-delete-backup="${escapeHtml(item.backupFolder)}" title="清除本历史及其备份">清除</button></div></td>
     </tr>`;
   }).join("");
   return `<section class="orphan-panel delete-history-panel"><div class="table-title"><div><h2>删除历史</h2><p>仅显示已经成功完成的删除操作。这里保留目标信息和备份位置，不会自动覆盖当前 Codex 数据。</p></div><div class="table-title-actions"><span>${deleteHistory.length} 条记录</span><button class="button danger compact" data-clear-history="delete" ${deleteHistory.length ? "" : "disabled"}>一键清除</button></div></div>
@@ -356,14 +392,15 @@ function backupHistoryView(): string {
 }
 
 function repairDialog(session: Session): string {
-  const defaultTarget = session.projectRoots[0] || session.databaseCwd || session.conversationCwd || "";
+  const draft = sessionRepairDraft?.sessionId === session.id ? sessionRepairDraft : null;
+  const defaultTarget = draft?.target || session.projectRoots[0] || session.databaseCwd || session.conversationCwd || "";
   return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true"><button id="close-modal" class="icon-button" aria-label="关闭">×</button>
     <p class="eyebrow">修复会话路径</p><h2>${escapeHtml(displayTitle(session.title))}</h2>
     <p>目标目录会写入 Codex 数据库，并替换该会话 JSONL 中与原工作目录完全相同的字段。请先退出 Codex，避免运行中的程序把旧值写回。</p>
     <label>目标目录<div class="path-picker"><input id="target-path" value="${escapeHtml(defaultTarget)}" readonly spellcheck="false" /><button id="choose-target" class="button secondary" type="button">选择文件夹</button></div></label>
-    <label class="child-agent-option"><input id="include-child-agents" type="checkbox" /> <span><strong>同时修复子代理会话</strong><small>递归更新该主会话派生的子代理数据库路径与 JSONL，并纳入同一次备份和回退。</small></span></label>
+    <label class="child-agent-option"><input id="include-child-agents" type="checkbox" ${draft?.includeChildAgents ? "checked" : ""} /> <span><strong>同时修复子代理会话</strong><small>递归更新该主会话派生的子代理数据库路径与 JSONL，并纳入同一次备份和回退。</small></span></label>
     <p class="confirmation-note">核查目标目录是否正确再点击“备份并修复”，系统会再次提示是否修复。</p>
-    <div class="modal-actions"><button id="close-modal-2" class="button secondary">取消</button><button id="confirm-repair" class="button">备份并修复</button></div>
+    <div class="modal-actions"><button id="close-modal-2" class="button secondary">取消</button><button id="confirm-repair" class="button" data-default-action>备份并修复</button></div>
   </section></div>`;
 }
 
@@ -378,7 +415,7 @@ function backupSettingsDialog(): string {
     <p>每次修复或删除前，管理器会在该目录中新建一个带时间戳的备份文件夹。</p>
     <label>当前备份目录<div class="path-picker"><input id="backup-base-path" value="${escapeHtml(backupPath)}" spellcheck="false" /><button id="choose-backup" class="button secondary" type="button">选择文件夹</button></div></label>
     <p class="confirmation-note">输入不存在的绝对路径时，会在保存或首次备份时自动创建该目录。</p>
-    <div class="modal-actions"><button id="open-backup" class="button secondary">打开备份目录</button><button id="save-backup-settings" class="button">保存</button></div>
+    <div class="modal-actions"><button id="open-backup" class="button secondary">打开备份目录</button><button id="save-backup-settings" class="button" data-default-action>保存</button></div>
   </section></div>`;
 }
 
@@ -427,21 +464,53 @@ function exportDialog(): string {
       </div>
     </section>
     <div class="export-footer"><div class="export-location"><span>导出到文件夹</span><div class="path-picker"><input id="export-directory" value="${escapeHtml(exportDirectory)}" readonly placeholder="请选择保存导出包的位置" /><button id="choose-export-directory" class="button secondary" type="button">选择文件夹</button></div></div>
-      <div class="modal-actions"><button id="cancel-export" class="button secondary">取消</button><button id="confirm-export" class="button" ${exportSelection.size && exportDirectory ? "" : "disabled"}>导出 ${exportSelection.size} 个会话</button></div>
+      <div class="modal-actions"><button id="cancel-export" class="button secondary">取消</button><button id="confirm-export" class="button" data-default-action ${exportSelection.size && exportDirectory ? "" : "disabled"}>导出 ${exportSelection.size} 个会话</button></div>
     </div>
   </section></div>`;
 }
 
 function importDialog(pkg: ImportPackageInfo): string {
   const projectNames = pkg.projects.map((project) => project.name).join("、") || "未归属项目";
+  const projectMappings = pkg.projects.map((project) => {
+    const target = importProjectPaths.get(project.id) ?? "";
+    return `<section class="import-project-mapping">
+      <strong>${escapeHtml(project.name)}</strong>
+      <small>原目录：${escapeHtml(displayPathText(project.roots.join(" · ") || "未记录"))}</small>
+      <div class="path-picker"><input value="${escapeHtml(target)}" readonly placeholder="请选择这台电脑上的项目目录" /><button class="button secondary" type="button" data-choose-import-project="${escapeHtml(project.id)}">选择文件夹</button></div>
+    </section>`;
+  }).join("");
+  const mappingsReady = pkg.projects.every((project) => importProjectPaths.has(project.id));
   return `<div class="modal-backdrop"><section class="modal import-modal" role="dialog" aria-modal="true"><button id="close-import" class="icon-button" aria-label="关闭">×</button>
     <p class="eyebrow">导入会话</p><h2>确认导入会话包</h2>
     <p>导出时间：${escapeHtml(new Date(pkg.exportedAt).toLocaleString("zh-CN"))}</p>
     <p>项目：${escapeHtml(projectNames)}<br />主会话：${pkg.visibleThreadCount} 个；包含会话记录：${pkg.threadCount} 个；对话日志：${pkg.logCount} 个。</p>
     <label>导出包清单<input value="${escapeHtml(pkg.manifestPath)}" readonly /></label>
-    <p class="confirmation-note">导入会写入 Codex 状态数据库、项目目录配置、侧栏项目归属和会话日志。原工作目录会保留，导入后可用本软件选择本机目录进行路径修复。导入前必须关闭 Codex。</p>
-    <div class="modal-actions"><button id="cancel-import" class="button secondary">取消</button><button id="confirm-import" class="button">备份并导入</button></div>
+    ${projectMappings ? `<div class="import-project-mappings"><p>为每个项目选择这台电脑上的目录：</p>${projectMappings}</div>` : ""}
+    <p class="confirmation-note">导入会同步转换数据库和会话日志中的工作目录，并登记这台电脑上的 Codex 项目与侧栏归属。导入前必须关闭 Codex。</p>
+    <div class="modal-actions"><button id="cancel-import" class="button secondary">取消</button><button id="confirm-import" class="button" data-default-action ${mappingsReady ? "" : "disabled"}>确认导入</button></div>
   </section></div>`;
+}
+
+function projectRepairDialog(project: Project): string {
+  const sessions = report!.sessions.filter((session) => session.projectId === project.id);
+  const draft = projectRepairDraft?.projectId === project.id ? projectRepairDraft : null;
+  const defaultTarget = draft?.target || project.roots[0] || sessions.find((session) => session.databaseCwd)?.databaseCwd || "";
+  return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true"><button id="close-project-repair" class="icon-button" aria-label="关闭">×</button>
+    <p class="eyebrow">修复项目路径</p><h2>${escapeHtml(project.name)}</h2>
+    <p>把本项目的项目目录、所有会话及其子代理统一到同一个本机目录。缺少 JSONL 日志的会话无法重建日志，将在结果中单独提示。</p>
+    <label>统一目标目录<div class="path-picker"><input id="project-target-path" value="${escapeHtml(defaultTarget)}" readonly spellcheck="false" /><button id="choose-project-target" class="button secondary" type="button">选择文件夹</button></div></label>
+    <p class="confirmation-note">共 ${sessions.length} 个主会话，其中 ${project.issueCount} 个当前存在问题。操作前会自动备份，并要求先退出 Codex。</p>
+    <div class="modal-actions"><button id="cancel-project-repair" class="button secondary">取消</button><button id="confirm-project-repair" class="button" data-default-action>备份并修复项目</button></div>
+  </section></div>`;
+}
+
+function projectMenu(menu: { projectId: string; x: number; y: number }): string {
+  const project = report!.projects.find((item) => item.id === menu.projectId);
+  if (!project) return "";
+  return `<div class="context-menu-layer" id="close-project-menu"><div class="context-menu" role="menu" style="left:${menu.x}px;top:${menu.y}px" aria-label="管理项目 ${escapeHtml(project.name)}">
+    <button type="button" role="menuitem" data-repair-project="${escapeHtml(project.id)}" ${project.issueCount > 0 ? "" : 'disabled title="当前项目没有需要修复的会话"'}>修复项目</button>
+    <button type="button" role="menuitem" class="danger-item" data-delete-project="${escapeHtml(project.id)}">删除项目</button>
+  </div></div>`;
 }
 
 function noticeDialog(currentNotice: Notice): string {
@@ -451,20 +520,22 @@ function noticeDialog(currentNotice: Notice): string {
   return `<div class="modal-backdrop notice-backdrop"><section class="modal notice-modal ${currentNotice.tone}" role="alertdialog" aria-modal="true">
     <p class="eyebrow">${currentNotice.tone === "success" ? "操作完成" : "需要处理"}</p><h2>${escapeHtml(currentNotice.title)}</h2>
     <p class="notice-message">${escapeHtml(currentNotice.message)}</p>
-    <div class="modal-actions">${action}<button id="close-notice" class="button ${currentNotice.tone === "warning" ? "secondary" : ""}">确定</button></div>
+    <div class="modal-actions">${action}<button id="close-notice" class="button ${currentNotice.tone === "warning" ? "secondary" : ""}" data-default-action>确定</button></div>
   </section></div>`;
 }
 
 function deleteConfirmationDialog(pending: PendingDeletion): string {
   const target = pending.kind === "session"
     ? `会话“${displayTitle(pending.session.title)}”及其全部子代理`
+    : pending.kind === "project"
+      ? `项目“${pending.project.name}”下的全部会话和项目配置`
     : `遗留日志“${pending.logPath}”`;
   return `<div class="modal-backdrop delete-confirmation-backdrop"><section class="modal delete-confirmation-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-confirmation-title">
     <button id="close-delete-confirmation" class="icon-button" aria-label="关闭">×</button>
     <p class="eyebrow danger-eyebrow">永久删除</p><h2 id="delete-confirmation-title">确认删除 ${escapeHtml(target)}</h2>
-    <p>这是第二次确认。继续后，管理器会先完成备份，再通过 Codex 自带接口永久删除该记录。</p>
+    <p>这是第二次确认。继续后，管理器会先完成备份，再通过 Codex 自带接口永久删除该记录。删除项目不会删除磁盘上的项目源代码目录。</p>
     <p class="confirmation-note">该操作不可撤销；如需保留会话，请点击取消。</p>
-    <div class="modal-actions"><button id="cancel-delete-confirmation" class="button secondary">取消</button><button id="confirm-delete-action" class="button danger">确认永久删除</button></div>
+    <div class="modal-actions"><button id="cancel-delete-confirmation" class="button secondary">取消</button><button id="confirm-delete-action" class="button danger" data-default-action>确认永久删除</button></div>
   </section></div>`;
 }
 
@@ -489,18 +560,43 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-project]").forEach((button) => button.addEventListener("click", () => {
     selectedProject = button.dataset.project!; render();
   }));
+  document.querySelectorAll<HTMLButtonElement>("[data-project]").forEach((button) => button.addEventListener("contextmenu", (event) => {
+    if (button.dataset.project === "all") return;
+    event.preventDefault();
+    projectContextMenu = { projectId: button.dataset.project!, x: Math.min(event.clientX, window.innerWidth - 180), y: Math.min(event.clientY, window.innerHeight - 100) };
+    render();
+  }));
+  document.querySelector("#close-project-menu")?.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).closest(".context-menu")) return;
+    projectContextMenu = null; render();
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-repair-project]").forEach((button) => button.addEventListener("click", () => {
+    selectedProjectForRepair = report!.projects.find((project) => project.id === button.dataset.repairProject) ?? null;
+    projectRepairDraft = null;
+    projectContextMenu = null; render();
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-delete-project]").forEach((button) => button.addEventListener("click", () => {
+    const project = report!.projects.find((item) => item.id === button.dataset.deleteProject);
+    projectContextMenu = null;
+    render();
+    if (project) void deleteProject(project);
+  }));
   document.querySelectorAll<HTMLButtonElement>("[data-health]").forEach((button) => button.addEventListener("click", () => {
     healthFilter = button.dataset.health as typeof healthFilter;
     selectedProject = "all";
     render();
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-repair]").forEach((button) => button.addEventListener("click", () => {
-    selectedSession = report!.sessions.find((session) => session.id === button.dataset.repair) ?? null; render();
+    selectedSession = report!.sessions.find((session) => session.id === button.dataset.repair) ?? null; sessionRepairDraft = null; render();
   }));
-  document.querySelector("#close-modal")?.addEventListener("click", () => { selectedSession = null; render(); });
-  document.querySelector("#close-modal-2")?.addEventListener("click", () => { selectedSession = null; render(); });
+  document.querySelector("#close-modal")?.addEventListener("click", () => { selectedSession = null; sessionRepairDraft = null; render(); });
+  document.querySelector("#close-modal-2")?.addEventListener("click", () => { selectedSession = null; sessionRepairDraft = null; render(); });
   document.querySelector("#choose-target")?.addEventListener("click", chooseTargetDirectory);
   document.querySelector("#confirm-repair")?.addEventListener("click", repairSelected);
+  document.querySelector("#close-project-repair")?.addEventListener("click", closeProjectRepair);
+  document.querySelector("#cancel-project-repair")?.addEventListener("click", closeProjectRepair);
+  document.querySelector("#choose-project-target")?.addEventListener("click", chooseProjectTargetDirectory);
+  document.querySelector("#confirm-project-repair")?.addEventListener("click", repairSelectedProject);
   document.querySelector("#close-backup-settings")?.addEventListener("click", () => { showBackupSettings = false; render(); });
   document.querySelector("#save-backup-settings")?.addEventListener("click", saveBackupDirectory);
   document.querySelector("#choose-backup")?.addEventListener("click", chooseBackupDirectory);
@@ -544,8 +640,9 @@ function bindEvents(): void {
     exportSessionsForProject(projectId).forEach((session) => { if (input.checked) exportSelection.add(session.id); else exportSelection.delete(session.id); });
     render();
   }));
-  document.querySelector("#close-import")?.addEventListener("click", () => { importPackage = null; render(); });
-  document.querySelector("#cancel-import")?.addEventListener("click", () => { importPackage = null; render(); });
+  document.querySelector("#close-import")?.addEventListener("click", closeImportDialog);
+  document.querySelector("#cancel-import")?.addEventListener("click", closeImportDialog);
+  document.querySelectorAll<HTMLButtonElement>("[data-choose-import-project]").forEach((button) => button.addEventListener("click", () => chooseImportProjectDirectory(button.dataset.chooseImportProject!)));
   document.querySelector("#confirm-import")?.addEventListener("click", importSelectedPackage);
   document.querySelector("#close-notice")?.addEventListener("click", () => { notice = null; render(); });
   document.querySelector("#close-codex-processes")?.addEventListener("click", closeCodexProcesses);
@@ -652,24 +749,55 @@ async function chooseImportPackage(): Promise<void> {
     });
     if (typeof selection !== "string") return;
     importPackage = await invoke<ImportPackageInfo>("inspect_export_package", { manifestPath: selection });
+    importProjectPaths.clear();
     render();
   } catch (error) { showToast(String(error), true); }
 }
 
+function closeImportDialog(): void {
+  importPackage = null;
+  importProjectPaths.clear();
+  render();
+}
+
+async function chooseImportProjectDirectory(projectId: string): Promise<void> {
+  const project = importPackage?.projects.find((item) => item.id === projectId);
+  if (!project) return;
+  const selection = await open({
+    title: `选择“${project.name}”在这台电脑上的项目目录`,
+    directory: true,
+    multiple: false,
+    defaultPath: importProjectPaths.get(projectId) || undefined,
+  });
+  if (typeof selection === "string") {
+    importProjectPaths.set(projectId, selection);
+    render();
+  }
+}
+
 async function importSelectedPackage(): Promise<void> {
   if (!importPackage) return;
+  if (importPackage.projects.some((project) => !importProjectPaths.has(project.id))) {
+    showToast("请先为每个项目选择这台电脑上的目录。", true);
+    return;
+  }
   const approved = await confirm(
-    `将导入 ${importPackage.visibleThreadCount} 个主会话及其配置，并把记录加入本机 Codex。\n\n导入前会备份当前状态；原工作目录将保留，之后可在本软件中修复路径。确认继续吗？`,
-    { title: "确认导入会话", kind: "warning", okLabel: "备份并导入", cancelLabel: "取消" },
+    `将导入 ${importPackage.visibleThreadCount} 个主会话及其配置，并把记录加入本机 Codex。\n\n导入不会创建操作前备份，工作目录会转换为已选择的本机项目目录。确认继续吗？`,
+    { title: "确认导入会话", kind: "warning", okLabel: "确认导入", cancelLabel: "取消" },
   );
   if (!approved) return;
   try {
     const result = await invoke<ActionResult>("import_sessions", {
-      request: { manifestPath: importPackage.manifestPath, confirmation: "IMPORT", backupBase: currentBackupBase() },
+      request: {
+        manifestPath: importPackage.manifestPath,
+        confirmation: "IMPORT",
+        projectMappings: importPackage.projects.map((project) => ({ projectId: project.id, targetPath: importProjectPaths.get(project.id)! })),
+      },
     });
     importPackage = null;
+    importProjectPaths.clear();
     await load();
-    notice = { title: "会话导入成功", message: `${result.message}\n\n导入内容：\n${result.changes.map((change) => `• ${change}`).join("\n")}\n\n导入前备份：${result.backupFolder}`, tone: "success" };
+    notice = { title: "会话导入成功", message: `${result.message}\n\n导入内容：\n${result.changes.map((change) => `• ${change}`).join("\n")}`, tone: "success" };
     render();
   } catch (error) {
     const text = String(error);
@@ -694,16 +822,64 @@ async function repairSelected(): Promise<void> {
     { title: "确认修复会话路径", kind: "warning", okLabel: "备份并修复", cancelLabel: "取消" },
   );
   if (!approved) return;
+  sessionRepairDraft = { sessionId: selectedSession.id, target, includeChildAgents };
   try {
     const result = await invoke<ActionResult>("repair_session", { request: { threadId: selectedSession.id, targetPath: target, confirmation: "REPAIR", backupBase: currentBackupBase(), includeChildAgents } });
     selectedSession = null;
+    sessionRepairDraft = null;
     await load();
     notice = { title: "修复成功", message: `${result.message}\n\n修复内容：\n${result.changes.map((change) => `• ${change}`).join("\n")}\n\n备份位置：${result.backupFolder}`, tone: "success" };
     render();
   } catch (error) {
     const text = String(error);
     if (text.includes("Codex 进程仍在运行")) {
-      selectedSession = null;
+      notice = { title: "请先退出 Codex", message: text, tone: "warning", canCloseCodex: true };
+      render();
+      return;
+    }
+    showToast(text, true);
+  }
+}
+
+function closeProjectRepair(): void {
+  selectedProjectForRepair = null;
+  projectRepairDraft = null;
+  render();
+}
+
+async function chooseProjectTargetDirectory(): Promise<void> {
+  const input = document.querySelector<HTMLInputElement>("#project-target-path");
+  if (!input || !selectedProjectForRepair) return;
+  const selection = await open({
+    title: `选择“${selectedProjectForRepair.name}”的统一项目目录`,
+    directory: true,
+    multiple: false,
+    defaultPath: input.value || undefined,
+  });
+  if (typeof selection === "string") input.value = selection;
+}
+
+async function repairSelectedProject(): Promise<void> {
+  if (!selectedProjectForRepair) return;
+  const project = selectedProjectForRepair;
+  const target = document.querySelector<HTMLInputElement>("#project-target-path")?.value.trim() ?? "";
+  if (!target) { showToast("请先选择统一目标目录。", true); return; }
+  const approved = await confirm(
+    `将把项目“${project.name}”的项目目录及全部会话、子代理工作目录统一为：\n${target}\n\n操作前会自动备份。确认继续吗？`,
+    { title: "确认修复整个项目", kind: "warning", okLabel: "备份并修复", cancelLabel: "取消" },
+  );
+  if (!approved) return;
+  projectRepairDraft = { projectId: project.id, target };
+  try {
+    const result = await invoke<ActionResult>("repair_project", { request: { projectId: project.id, targetPath: target, confirmation: "REPAIR_PROJECT", backupBase: currentBackupBase() } });
+    selectedProjectForRepair = null;
+    projectRepairDraft = null;
+    await load();
+    notice = { title: "项目修复成功", message: `${result.message}\n\n修复内容：\n${result.changes.map((change) => `• ${change}`).join("\n")}\n\n备份目录：${result.backupFolder}`, tone: "success" };
+    render();
+  } catch (error) {
+    const text = String(error);
+    if (text.includes("Codex 进程仍在运行")) {
       notice = { title: "请先退出 Codex", message: text, tone: "warning", canCloseCodex: true };
       render();
       return;
@@ -745,7 +921,7 @@ async function rollbackRepair(manifestPath: string): Promise<void> {
 }
 
 async function rollbackDelete(manifestPath: string): Promise<void> {
-  const item = deleteHistory.find((history) => `${history.backupFolder}/delete-history.json` === manifestPath);
+  const item = deleteHistory.find((history) => joinDisplayPath(history.backupFolder, "delete-history.json") === manifestPath);
   if (!item) return;
   const approved = await confirm(
     `将恢复“${displayTitle(item.sessionTitle)}”${item.childCount ? `及其 ${item.childCount} 个子代理` : ""}。\n\n回退前会先备份当前状态，且必须先退出 Codex。确认继续吗？`,
@@ -859,6 +1035,17 @@ async function deleteSession(session: Session): Promise<void> {
   render();
 }
 
+async function deleteProject(project: Project): Promise<void> {
+  const sessions = report?.sessions.filter((session) => session.projectId === project.id).length ?? 0;
+  const approved = await confirm(
+    `即将删除项目“${project.name}”下的 ${sessions} 个主会话、全部子代理以及 Codex 项目配置。\n\n不会删除磁盘上的源代码目录。删除前必须退出 Codex，并会自动备份。确认继续吗？`,
+    { title: "确认删除整个项目", kind: "warning", okLabel: "继续删除", cancelLabel: "取消" },
+  );
+  if (!approved) return;
+  pendingDeletion = { kind: "project", project };
+  render();
+}
+
 function closeDeleteConfirmation(): void {
   pendingDeletion = null;
   render();
@@ -877,6 +1064,13 @@ async function executePendingDeletion(): Promise<void> {
       await load();
       notice = { title: "会话已删除", message: `${result.message}\n\n备份位置：${result.backupFolder}`, tone: "success" };
       render();
+    } else if (deletion.kind === "project") {
+      const result = await invoke<ActionResult>("delete_project", { request: { projectId: deletion.project.id, confirmation: "DELETE_PROJECT", backupBase: currentBackupBase() } });
+      pendingDeletion = null;
+      selectedProject = "all";
+      await load();
+      notice = { title: "项目已删除", message: `${result.message}\n\n操作备份：${result.backupFolder}`, tone: "success" };
+      render();
     } else {
       const result = await invoke<ActionResult>("delete_orphan", { request: { logPath: deletion.logPath, confirmation, backupBase: currentBackupBase() } });
       pendingDeletion = null;
@@ -887,7 +1081,6 @@ async function executePendingDeletion(): Promise<void> {
   } catch (error) {
     const text = String(error);
     if (text.includes("Codex 进程仍在运行")) {
-      pendingDeletion = null;
       notice = { title: "请先退出 Codex", message: text, tone: "warning", canCloseCodex: true };
       render();
       return;
