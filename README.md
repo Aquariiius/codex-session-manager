@@ -5,7 +5,7 @@
 
   **核查、修复、迁移与备份 Codex 会话**
 
-  [![Version](https://img.shields.io/badge/version-1.0.0-4c9f70.svg)](./src-tauri/tauri.conf.json)
+  [![Version](https://img.shields.io/badge/version-1.2.0-4c9f70.svg)](./src-tauri/tauri.conf.json)
   [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-607d8b.svg)](#-系统要求)
   [![Tauri](https://img.shields.io/badge/Tauri-2-24c8db.svg)](https://tauri.app/)
   [![Rust](https://img.shields.io/badge/Rust-2021-e57324.svg)](https://www.rust-lang.org/)
