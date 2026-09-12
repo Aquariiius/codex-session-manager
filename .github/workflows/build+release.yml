@@ -128,6 +128,10 @@ jobs:
           BUILD_SHA: ${{ steps.build.outputs.sha }}
         run: |
           set -euo pipefail
+          if [[ ! -s release_notes.md ]]; then
+            echo "::error::release_notes.md is missing or empty in the built commit."
+            exit 1
+          fi
           shopt -s nullglob
           windows=(installers/windows-x64/*-setup.exe)
           arm=(installers/macos-arm64/*.dmg)
@@ -145,14 +149,27 @@ jobs:
           fi
           version="${RELEASE_TAG#v}"
           mkdir -p release-assets
-          prefix="release-assets/Codex Session Manager_${version}"
+          asset_base="Codex.Session.Manager_${version}"
+          prefix="release-assets/${asset_base}"
           cp "${windows[0]}" "${prefix}_x64-setup.exe"
           cp "${arm[0]}" "${prefix}_aarch64.dmg"
           cp "${intel[0]}" "${prefix}_x64.dmg"
+          for placeholder in WINDOWS_X64_URL MACOS_ARM64_URL MACOS_X64_URL; do
+            if ! grep -Fq "{{${placeholder}}}" release_notes.md; then
+              echo "::error::release_notes.md is missing the {{${placeholder}}} placeholder."
+              exit 1
+            fi
+          done
+          release_url="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}"
+          sed \
+            -e "s|{{WINDOWS_X64_URL}}|${release_url}/${asset_base}_x64-setup.exe|g" \
+            -e "s|{{MACOS_ARM64_URL}}|${release_url}/${asset_base}_aarch64.dmg|g" \
+            -e "s|{{MACOS_X64_URL}}|${release_url}/${asset_base}_x64.dmg|g" \
+            release_notes.md > release_notes.generated.md
           # Upload all assets to a draft before making the release public.
           gh release create "$RELEASE_TAG" "${prefix}_x64-setup.exe" \
             "${prefix}_aarch64.dmg" "${prefix}_x64.dmg" \
             --target "$BUILD_SHA" --title "Codex Session Manager $RELEASE_TAG" \
-            --generate-notes --draft
+            --notes-file release_notes.generated.md --draft
           gh release edit "$RELEASE_TAG" --draft=false
           gh release view "$RELEASE_TAG" --json url --jq '.url' >> "$GITHUB_STEP_SUMMARY"
