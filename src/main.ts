@@ -4,6 +4,13 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import "./style.css";
 
 type Status = "match" | "mismatch" | "unlinked" | "missing_log";
+type ThemeMode = "system" | "dark" | "light";
+
+const themeOptions: Array<{ value: ThemeMode; icon: string; label: string }> = [
+  { value: "system", icon: "◐", label: "跟随系统" },
+  { value: "dark", icon: "☾", label: "深色主题" },
+  { value: "light", icon: "☀", label: "浅色主题" },
+];
 
 interface Project {
   id: string;
@@ -135,7 +142,9 @@ let sessionRepairDraft: { sessionId: string; target: string; includeChildAgents:
 let projectRepairDraft: { projectId: string; target: string } | null = null;
 let projectContextMenu: { projectId: string; x: number; y: number } | null = null;
 let healthFilter: "all" | "mismatch" | "unlinked" | "missing_log" | "healthy" = "all";
-let theme: "light" | "dark" = localStorage.getItem("theme") === "light" ? "light" : "dark";
+const savedTheme = localStorage.getItem("theme");
+let themeMode: ThemeMode = savedTheme === "light" || savedTheme === "dark" || savedTheme === "system" ? savedTheme : "system";
+let showThemeMenu = false;
 let backupBase = localStorage.getItem("backup-base");
 let showBackupSettings = false;
 let notice: Notice | null = null;
@@ -149,8 +158,18 @@ let importPackage: ImportPackageInfo | null = null;
 let importProjectPaths = new Map<string, string>();
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
+const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+systemThemeQuery.addEventListener("change", () => {
+  if (themeMode === "system") render();
+});
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && showThemeMenu) {
+    showThemeMenu = false;
+    render();
+    return;
+  }
   if (event.key !== "Enter" || event.isComposing || event.repeat) return;
   const dialogs = document.querySelectorAll<HTMLElement>(".modal-backdrop");
   const activeDialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
@@ -224,8 +243,12 @@ function healthFilterButton(value: typeof healthFilter, label: string, count: nu
   return `<button class="health-filter health-${value} ${healthFilter === value ? "selected" : ""}" data-health="${value}">${label}<span>${count}</span></button>`;
 }
 
+function resolvedTheme(): "light" | "dark" {
+  return themeMode === "system" ? (systemThemeQuery.matches ? "dark" : "light") : themeMode;
+}
+
 function render(): void {
-  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.theme = resolvedTheme();
   if (!report) {
     app.innerHTML = `<section class="empty"><div class="spinner"></div><h1>正在读取本地 Codex 数据</h1><p>扫描项目、当前会话和历史 JSONL 记录。</p></section>`;
     return;
@@ -236,7 +259,13 @@ function render(): void {
   app.innerHTML = `
     <header class="topbar">
       <div><p class="eyebrow">LOCAL CODEX AUDIT</p><h1>Codex Session Manager</h1></div>
-      <div class="topbar-actions"><button id="export-sessions" class="button secondary">导出会话</button><button id="import-sessions" class="button secondary">导入会话</button><button id="backup-settings" class="button secondary">备份目录</button><button id="theme-toggle" class="button secondary" aria-label="切换主题">${theme === "dark" ? "☀ 浅色主题" : "◐ 深色主题"}</button><button id="rescan" class="button secondary">重新扫描</button></div>
+      <div class="topbar-actions">
+        <div class="theme-picker">
+          <button id="theme-toggle" class="button secondary theme-toggle" aria-haspopup="menu" aria-expanded="${showThemeMenu}"><span aria-hidden="true">${themeOptions.find((option) => option.value === themeMode)!.icon}</span><span>${themeOptions.find((option) => option.value === themeMode)!.label}</span><span aria-hidden="true">▾</span></button>
+          ${showThemeMenu ? `<button id="close-theme-menu" class="theme-menu-layer" aria-label="关闭主题菜单"></button><div class="theme-menu" role="menu" aria-label="选择界面主题">${themeOptions.map((option) => `<button class="theme-option ${themeMode === option.value ? "selected" : ""}" data-theme-option="${option.value}" role="menuitemradio" aria-checked="${themeMode === option.value}"><span aria-hidden="true">${option.icon}</span><span>${option.label}</span><b aria-hidden="true">${themeMode === option.value ? "✓" : ""}</b></button>`).join("")}</div>` : ""}
+        </div>
+        <button id="rescan" class="button secondary">重新扫描</button>
+      </div>
     </header>
     <section class="summary-grid">
       ${metric("项目", report.summary.projects, "neutral")}
@@ -246,16 +275,21 @@ function render(): void {
       ${metric("遗留记录", report.summary.orphanRecords, "warn")}
     </section>
     <section class="source-note">
-      <span>当前数据源</span><code>${escapeHtml(displayPathText(report.stateDatabase))}</code>
-      <span>会话日志</span><code>${escapeHtml(displayPathText(joinDisplayPath(report.codexHome, "sessions")))} · archived_sessions</code>
+      <div class="source-paths">
+        <span>当前数据源</span><code>${escapeHtml(displayPathText(report.stateDatabase))}</code>
+        <span>会话日志</span><code>${escapeHtml(displayPathText(joinDisplayPath(report.codexHome, "sessions")))} · archived_sessions</code>
+      </div>
     </section>
-    <nav class="tabs" aria-label="页面">
-      <button class="tab ${activeTab === "sessions" ? "active" : ""}" data-tab="sessions">项目与会话 <b>${report.summary.sessions}</b></button>
-      <button class="tab ${activeTab === "orphans" ? "active" : ""}" data-tab="orphans">已删除会话的遗留记录 <b>${report.summary.orphanRecords}</b></button>
-      <button class="tab ${activeTab === "history" ? "active" : ""}" data-tab="history">修复历史 <b>${repairHistory.length}</b></button>
-      <button class="tab ${activeTab === "delete-history" ? "active" : ""}" data-tab="delete-history">删除历史 <b>${deleteHistory.length}</b></button>
-      <button class="tab ${activeTab === "backup-history" ? "active" : ""}" data-tab="backup-history">备份历史 <b>${backupHistory.length}</b></button>
-    </nav>
+    <div class="tabs-row">
+      <nav class="tabs" aria-label="页面">
+        <button class="tab ${activeTab === "sessions" ? "active" : ""}" data-tab="sessions">项目与会话 <b>${report.summary.sessions}</b></button>
+        <button class="tab ${activeTab === "orphans" ? "active" : ""}" data-tab="orphans">已删除会话的遗留记录 <b>${report.summary.orphanRecords}</b></button>
+        <button class="tab ${activeTab === "history" ? "active" : ""}" data-tab="history">修复历史 <b>${repairHistory.length}</b></button>
+        <button class="tab ${activeTab === "delete-history" ? "active" : ""}" data-tab="delete-history">删除历史 <b>${deleteHistory.length}</b></button>
+        <button class="tab ${activeTab === "backup-history" ? "active" : ""}" data-tab="backup-history">备份历史 <b>${backupHistory.length}</b></button>
+      </nav>
+      <div class="source-actions"><button id="backup-settings" class="button secondary">备份目录</button><button id="import-sessions" class="button secondary">导入会话</button><button id="export-sessions" class="button secondary">导出会话</button></div>
+    </div>
     ${activeTab === "sessions" ? sessionsView(filtered) : activeTab === "orphans" ? orphanView() : activeTab === "history" ? historyView() : activeTab === "delete-history" ? deleteHistoryView() : backupHistoryView()}
     ${!notice && selectedSession ? repairDialog(selectedSession) : ""}
     ${!notice && selectedProjectForRepair ? projectRepairDialog(selectedProjectForRepair) : ""}
@@ -541,11 +575,14 @@ function deleteConfirmationDialog(pending: PendingDeletion): string {
 
 function bindEvents(): void {
   document.querySelector("#rescan")?.addEventListener("click", () => load(true));
-  document.querySelector("#theme-toggle")?.addEventListener("click", () => {
-    theme = theme === "dark" ? "light" : "dark";
-    localStorage.setItem("theme", theme);
+  document.querySelector("#theme-toggle")?.addEventListener("click", () => { showThemeMenu = !showThemeMenu; render(); });
+  document.querySelector("#close-theme-menu")?.addEventListener("click", () => { showThemeMenu = false; render(); });
+  document.querySelectorAll<HTMLButtonElement>("[data-theme-option]").forEach((button) => button.addEventListener("click", () => {
+    themeMode = button.dataset.themeOption as ThemeMode;
+    localStorage.setItem("theme", themeMode);
+    showThemeMenu = false;
     render();
-  });
+  }));
   document.querySelector("#backup-settings")?.addEventListener("click", () => { showBackupSettings = true; render(); });
   document.querySelector("#export-sessions")?.addEventListener("click", () => {
     collapsedExportProjects.clear();
